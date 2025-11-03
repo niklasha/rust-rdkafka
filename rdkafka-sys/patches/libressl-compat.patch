@@ -1,0 +1,96 @@
+diff --git a/src/rdkafka_ssl.c b/src/rdkafka_ssl.c
+index 477fac46..2e966dea 100644
+--- a/src/rdkafka_ssl.c
++++ b/src/rdkafka_ssl.c
+@@ -53,6 +53,54 @@
+ 
+ #include <ctype.h>
+ 
++#if defined(LIBRESSL_VERSION_NUMBER)
++#define RD_KAFKA_HAVE_SSL_CERT_CB 0
++#else
++#define RD_KAFKA_HAVE_SSL_CERT_CB 1
++#endif
++
++#if defined(LIBRESSL_VERSION_NUMBER)
++/**
++ * LibreSSL lacks SSL_CTX_use_cert_and_key(). Provide a compatibility shim
++ * that mirrors the behaviour used by librdkafka when loading certificates
++ * from PKCS#12 bundles.
++ */
++static int rd_kafka_SSL_CTX_use_cert_and_key(SSL_CTX *ctx,
++                                             X509 *cert,
++                                             EVP_PKEY *pkey,
++                                             STACK_OF(X509) *ca,
++                                             int override) {
++        int i;
++
++        if (!override && SSL_CTX_get0_certificate(ctx))
++                return 0;
++
++        if (override)
++                SSL_CTX_clear_chain_certs(ctx);
++
++        if (SSL_CTX_use_certificate(ctx, cert) != 1)
++                return 0;
++
++        if (SSL_CTX_use_PrivateKey(ctx, pkey) != 1)
++                return 0;
++
++        if (SSL_CTX_check_private_key(ctx) != 1)
++                return 0;
++
++        if (ca) {
++                for (i = 0; i < sk_X509_num(ca); i++) {
++                        X509 *chain = sk_X509_value(ca, i);
++                        if (SSL_CTX_add1_chain_cert(ctx, chain) != 1)
++                                return 0;
++                }
++        }
++
++        return 1;
++}
++#else
++#define rd_kafka_SSL_CTX_use_cert_and_key SSL_CTX_use_cert_and_key
++#endif
++
+ #if !_WIN32
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -1078,6 +1126,7 @@ static int rd_kafka_ssl_cert_issuer_match(STACK_OF(X509_NAME) * ca_dns,
+  * SASL_SSL authentication on the same connection in case
+  * `ssl.client.auth=requested`.
+  */
++#if RD_KAFKA_HAVE_SSL_CERT_CB
+ static int rd_kafka_ssl_cert_callback(SSL *ssl, void *arg) {
+         rd_kafka_t *rk = arg;
+         STACK_OF(X509_NAME) * ca_list;
+@@ -1136,6 +1185,7 @@ static int rd_kafka_ssl_cert_callback(SSL *ssl, void *arg) {
+         SSL_certs_clear(ssl);
+         return 1;
+ }
++#endif
+ 
+ /**
+  * @brief Registers certificates, keys, etc, on the SSL_CTX
+@@ -1539,7 +1589,7 @@ static int rd_kafka_ssl_set_certs(rd_kafka_t *rk,
+                 PKCS12_free(p12);
+                 BIO_free(bio);
+ 
+-                r = SSL_CTX_use_cert_and_key(ctx, cert, pkey, ca, 1);
++                r = rd_kafka_SSL_CTX_use_cert_and_key(ctx, cert, pkey, ca, 1);
+                 RD_IF_FREE(cert, X509_free);
+                 RD_IF_FREE(pkey, EVP_PKEY_free);
+                 if (ca != NULL)
+@@ -1631,9 +1681,11 @@ static int rd_kafka_ssl_set_certs(rd_kafka_t *rk,
+                 return -1;
+         }
+ 
++#if RD_KAFKA_HAVE_SSL_CERT_CB
+         /* Set client certificate callback to control the behaviour
+          * of client certificate selection TLS handshake. */
+         SSL_CTX_set_cert_cb(ctx, rd_kafka_ssl_cert_callback, rk);
++#endif
+ 
+         return 0;
+ }

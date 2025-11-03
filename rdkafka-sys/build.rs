@@ -187,7 +187,23 @@ fn build_librdkafka() {
         //
         // https://github.com/edenhill/mklove/issues/17
         println!("Cloning librdkafka");
-        run_command_or_fail(".", "cp", &["-a", "librdkafka/.", &out_dir]);
+        // Use portable flags so both GNU and BSD cp behave the same.
+        run_command_or_fail(".", "cp", &["-Rp", "librdkafka/.", &out_dir]);
+    }
+
+    if env::var("TARGET")
+        .map(|t| t.contains("openbsd"))
+        .unwrap_or(false)
+    {
+        let patch_path = Path::new("patches/libressl-compat.patch")
+            .canonicalize()
+            .expect("failed to locate LibreSSL compatibility patch");
+        let patch_path_string = patch_path.to_string_lossy().into_owned();
+        run_command_or_fail(
+            &out_dir,
+            "patch",
+            &["-p1", "--forward", "-i", patch_path_string.as_str()],
+        );
     }
 
     println!("Configuring librdkafka");
@@ -199,7 +215,7 @@ fn build_librdkafka() {
     }
     run_command_or_fail(
         &out_dir,
-        if cfg!(target_os = "freebsd") {
+        if cfg!(target_os = "freebsd") || cfg!(target_os = "openbsd") {
             "gmake"
         } else {
             "make"
