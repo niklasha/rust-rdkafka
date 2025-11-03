@@ -1,7 +1,6 @@
 use std::borrow::Borrow;
 use std::env;
 use std::ffi::OsStr;
-#[cfg(feature = "cmake-build")]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
@@ -37,6 +36,32 @@ where
         Ok((false, None)) => panic!("Command got killed"),
         Err(e) => panic!("Command failed with error: {}", e),
     }
+}
+
+fn apply_openbsd_libressl_patch(dir: &Path) {
+    if !env::var("TARGET")
+        .map(|t| t.contains("openbsd"))
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let marker = dir.join("src").join("rdkafka_ssl.c");
+    if let Ok(contents) = fs::read_to_string(&marker) {
+        if contents.contains("RD_KAFKA_HAVE_SSL_CERT_CB") {
+            return;
+        }
+    }
+
+    let patch_path = Path::new("patches/libressl-compat.patch")
+        .canonicalize()
+        .expect("failed to locate LibreSSL compatibility patch");
+    let patch_arg = patch_path.to_string_lossy();
+    run_command_or_fail(
+        dir.to_string_lossy().as_ref(),
+        "patch",
+        &["-p1", "-N", "--forward", "-i", patch_arg.as_ref()],
+    );
 }
 
 fn main() {
@@ -191,20 +216,7 @@ fn build_librdkafka() {
         run_command_or_fail(".", "cp", &["-Rp", "librdkafka/.", &out_dir]);
     }
 
-    if env::var("TARGET")
-        .map(|t| t.contains("openbsd"))
-        .unwrap_or(false)
-    {
-        let patch_path = Path::new("patches/libressl-compat.patch")
-            .canonicalize()
-            .expect("failed to locate LibreSSL compatibility patch");
-        let patch_path_string = patch_path.to_string_lossy().into_owned();
-        run_command_or_fail(
-            &out_dir,
-            "patch",
-            &["-p1", "--forward", "-i", patch_path_string.as_str()],
-        );
-    }
+    apply_openbsd_libressl_patch(Path::new(&out_dir));
 
     println!("Configuring librdkafka");
     run_command_or_fail(&out_dir, "./configure", configure_flags.as_slice());
@@ -230,7 +242,19 @@ fn build_librdkafka() {
 
 #[cfg(feature = "cmake-build")]
 fn build_librdkafka() {
-    let mut config = cmake::Config::new("librdkafka");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR missing"));
+    let source_dir = out_dir.join("librdkafka-src");
+    let source_dir_str = source_dir.to_string_lossy().into_owned();
+
+    if !source_dir.exists() {
+        println!("Cloning librdkafka");
+        fs::create_dir_all(&source_dir).expect("failed to create librdkafka source dir");
+        run_command_or_fail(".", "cp", &["-Rp", "librdkafka/.", source_dir_str.as_str()]);
+    }
+
+    apply_openbsd_libressl_patch(&source_dir);
+
+    let mut config = cmake::Config::new(source_dir_str.as_str());
     let mut cmake_library_paths = vec![];
 
     config
